@@ -1,0 +1,7 @@
+{
+  "name": "container-julia-easydensity",
+  "image": "xuemeng-julia",
+  "workspaceFolder": "/work",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/work,type=bind",
+  "remoteUser": "root"
+}
