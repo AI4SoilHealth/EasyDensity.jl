@@ -15,8 +15,8 @@ using Plots
 using JLD2
 # using CairoMakie
 
-# 05 -  hybrid and sparse
-testid = "05_hybridspase";
+# 06 - flexiable BD, both oBD and mBD will be learnt by NN
+testid = "06_flexBD";
 results_dir = joinpath(@__DIR__, "eval");
 
 # input
@@ -57,13 +57,13 @@ end
 parameters = (
     SOCconc = (0.01f0, 0.0f0, 1.0f0),   # fraction
     CF      = (0.15f0, 0.0f0, 1.0f0),   # fraction,
-    oBD     = (0.20f0, 0.05f0, 0.40f0),  # g/cm^3
-    mBD     = (1.20f0, 0.75f0, 2.0f0),  # global
+    oBD     = (0.20f0, 0.05f0, 0.40f0),  # also NN learnt, g/cm3
+    mBD     = (1.20f0, 0.75f0, 2.0f0),  # NN leanrt
 )
 
 # define param for hybrid model
-neural_param_names = [:SOCconc, :CF, :mBD]
-global_param_names = [:oBD]
+neural_param_names = [:SOCconc, :CF, :mBD, :oBD]
+# global_param_names = [:oBD]
 forcing = Symbol[]
 targets = [:BD, :SOCconc, :SOCdensity, :CF]       # SOCconc is both a param and a target
 
@@ -91,7 +91,7 @@ for bs in batch_sizes, lr in lrs, act in acts
         SOCD_model,
         parameters,
         neural_param_names,
-        global_param_names;     
+        [];     
         hidden_layers = [256, 128, 64, 32, 16],
         activation    = act,
         scale_nn_outputs = true,
@@ -135,13 +135,13 @@ for bs in batch_sizes, lr in lrs, act in acts
     if !isnan(best_r2_here) && best_r2_here > best_r2
         best_r2 = best_r2_here
 
-        # map global mBD -> physical
-        oBD_phys = EasyHybrid.scale_single_param(:oBD, res.ps[:oBD], hm.parameters) |> vec |> first
-        oBD_raw  = res.ps[:oBD][1]  # unconstrained optimizer value
-
-        # per-sample oBD
+        # per-sample mBD
         mBD_phys = (hasproperty(res, :val_diffs) && hasproperty(res.val_diffs, :mBD)) ?
                 collect(res.val_diffs.mBD) : nothing
+
+        # per-sample oBD
+        oBD_phys = (hasproperty(res, :val_diffs) && hasproperty(res.val_diffs, :oBD)) ?
+                collect(res.val_diffs.oBD) : nothing
 
         best_bundle = (
             ps = deepcopy(res.ps),
@@ -153,7 +153,7 @@ for bs in batch_sizes, lr in lrs, act in acts
                     r2=best_r2_here, mse=best_mse_here),
             # convenience fields
             oBD_physical = oBD_phys,
-            oBD_unconstr = oBD_raw,
+            # oBD_unconstr = oBD_raw,
             mBD_phys = mBD_phys
         )
     end
@@ -181,7 +181,6 @@ jldsave(file_path;
     meta=best_bundle.meta,
     mBD_phys=best_bundle.mBD_phys,
     oBD_physical=best_bundle.oBD_physical,      # use the actual field
-    oBD_unconstr=best_bundle.oBD_unconstr
 )
 
 # @load joinpath(results_dir, "best_model_$(tgt).jld2") ps st model val_obs_pred meta
@@ -254,20 +253,22 @@ plt = histogram2d(
 )   
 savefig(plt, joinpath(results_dir, "$(testid)_BD.vs.SOCconc.png"));
 
-# save / print parameters: mBD and per-sample oBD
-# oBD global
+# save / print parameters: mBD and oBD
 @load jld oBD_physical
-@info "Global oBD ≈ $(round(oBD_physical, digits=4))"
+histogram(oBD_physical; bins=:sturges, xlabel="learned oBD", ylabel="count",
+          title="Distribution of learned oBD", legend=false)
+vline!([mean(oBD_physical)]; lw=2, label=false)  # mean marker
 
 @load jld mBD_phys
 histogram(mBD_phys; bins=:sturges, xlabel="learned mBD", ylabel="count",
           title="Distribution of learned mBD", legend=false)
 vline!([mean(mBD_phys)]; lw=2, label=false)  # mean marker
-@info "Saved histogram to $(joinpath(results_dir, "mBD_histogram.png"))"
+@info "Saved histogram to $(joinpath(results_dir, "$(testid)_mBD_histogram.png"))"
 
 # plot mBD_phys and texture
 texture = CSV.read(joinpath(@__DIR__, "data/lucas_test_texture.csv"), DataFrame; normalizenames=true)
 texture.mBD_phys = mBD_phys
+texture.oBD_phys = oBD_physical
 
 
 for col in (:clay, :silt, :sand)
@@ -280,8 +281,6 @@ end
 
 # drop rows with missings in these columns
 tex = dropmissing(texture, [:clay, :sand, :BD, :mBD_phys])
-cmin = 0.7 #minimum(vcat(tex.BD, tex.mBD_phys))
-cmax = 1.6 #maximum(vcat(tex.BD, tex.mBD_phys))
 
 # BD plot
 p1 = Plots.scatter(tex.clay, tex.sand;
@@ -293,7 +292,7 @@ p1 = Plots.scatter(tex.clay, tex.sand;
     legend = false,
     colorbar = true,
     color = cgrad(:algae),
-    clim = (cmin, cmax),
+    # clim = (cmin, cmax),
     markersize = 2.5, markerstrokewidth = 0,
     aspect_ratio = :equal)
 
@@ -306,14 +305,45 @@ p2 = Plots.scatter(tex.clay, tex.sand;
     title = "mineral BD",
     legend = false,
     colorbar = true,
-    color = cgrad(:viridis, rev=true),
-    clim = (cmin, cmax),
+    color = cgrad(:dense),
+    # clim = (cmin, cmax),
     markersize = 2.5, markerstrokewidth = 0,
     aspect_ratio = :equal)
 
-finalplot = Plots.plot(p1, p2, layout=(1,2), size=(900,450))
+# oBD_phys
+p3 = Plots.scatter(tex.clay, tex.sand;
+    zcolor = tex.oBD_phys,
+    xlabel = "Clay",
+    ylabel = "Sand",
+    # colorbar_title = "mBD_phys",
+    title = "organic BD",
+    legend = false,
+    colorbar = true,
+    color = cgrad(:solar, rev=true),
+    # clim = (cmin, cmax),
+    markersize = 2.5, markerstrokewidth = 0,
+    aspect_ratio = :equal)
+
+finalplot = Plots.plot(p1, p2, p3, layout=(1,3), size=(1350,450))
 display(finalplot)
 savefig(finalplot, joinpath(results_dir, "$(testid)_texture.vs.BD.png")) 
+
+# 2D histograms
+p1 = histogram2d(tex.clay, tex.BD; xlabel="Clay (%)", ylabel="Observed BD",
+    bins=40, color=cgrad(:thermal, rev=true), legend=false)
+p2 = histogram2d(tex.clay, tex.mBD_phys; xlabel="Clay (%)", ylabel="Mineral BD",
+    bins=40, color=cgrad(:thermal, rev=true), legend=false)
+p3 = histogram2d(tex.clay, tex.oBD_phys; xlabel="Clay (%)", ylabel="Organic BD",
+    bins=40, color=cgrad(:thermal, rev=true), legend=false)
+
+# combine and add simple padding around edges
+finalplot = Plots.plot(p1, p2, p3;
+    layout = (1,3),
+    size = (1500, 500),
+    margin = 7Plots.mm)   # ← simplest way to add breathing room
+
+display(finalplot)
+savefig(finalplot, joinpath(results_dir, "$(testid)_clay.vs.BD.png")) 
 
 # # MTD SOCdensity
 # socdensity_pred = val_tables[:SOCconc_pred] .* val_tables[:BD_pred] .* (1 .- val_tables[:CF_pred]);
