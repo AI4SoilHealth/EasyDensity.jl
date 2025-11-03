@@ -18,6 +18,7 @@ coords = collect(zip(df_o.lat, df_o.lon))
 
 # t clean covariates
 names_cov = Symbol.(names(df_o))[19:end-1]
+# println("original cov number:", length(names_cov))
 # names_meta = Symbol.(names(df_o))[1:18]
 
 # Fix soilsuite and cropland extent columns
@@ -55,7 +56,7 @@ names_cov = filter(x -> !(x in cols_to_drop_col), names_cov) # remove cols-to-dr
 if !isempty(cols_to_drop_row) 
     df_o = subset(df_o, cols_to_drop_row .=> ByRow(!ismissing)) # drop rows with missing values in cols_to_drop_row
 end
-println(size(df_o))
+# println(size(df_o))
 
 cols_to_drop_col = Symbol[] 
 for col in names_cov
@@ -67,12 +68,11 @@ end
 names_cov = filter(x -> !(x in cols_to_drop_col), names_cov) # remove cols-to-drop from names_cov
 println(size(df_o))
 
-
 # for col in names_cov # to check covairate distribution
 #     println(string(col)[1:10], ' ', round(std(df[:, col]); digits=2), ' ', round(mean(df[:, col]); digits=2))
 # end
 
-# # Normalize covariates with std>1
+# # Normalize covariates by (x-mean) / std
 means = mean.(eachcol(df_o[:, names_cov]))
 stds = std.(eachcol(df_o[:, names_cov]))
 for col in names_cov
@@ -80,7 +80,6 @@ for col in names_cov
 end
 df_o[:, names_cov] .= (df_o[:, names_cov] .- means') ./ stds'
 
-println(size(df))
 df_o.row_id = 1:nrow(df_o);
 # CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed.csv"), df)
 
@@ -93,19 +92,20 @@ for col in [:clay, :silt, :sand]
     end) => col)
 end
 
+CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed_v20251103.csv"), df_o)
 
-# split train and test
-raw_val = dropmissing(df_o, target_names);
-Random.seed!(42);
-eligible = raw_val.row_id;
-train_ids, val_ids = splitobs(collect(eligible); at=0.8, shuffle=true);
-test  = df_o[in.(df_o.row_id, Ref(val_ids)), [:time, :BD, :SOCconc, :CF, :SOCdensity, names_cov...]]
-test_texture = df_o[in.(df_o.row_id, Ref(val_ids)), [:time, :lat, :lon, :id, :clay, :silt, :sand, :BD]]
-train = df_o[.!in.(df_o.row_id, Ref(val_ids)), [:time, :BD, :SOCconc, :CF, :SOCdensity, names_cov...]]
+# # split train and test
+# raw_val = dropmissing(df_o, target_names);
+# Random.seed!(42);
+# eligible = raw_val.row_id;
+# train_ids, val_ids = splitobs(collect(eligible); at=0.8, shuffle=true);
+# test  = df_o[in.(df_o.row_id, Ref(val_ids)), [:time, :BD, :SOCconc, :CF, :SOCdensity, names_cov...]]
+# test_texture = df_o[in.(df_o.row_id, Ref(val_ids)), [:time, :lat, :lon, :id, :clay, :silt, :sand, :BD]]
+# train = df_o[.!in.(df_o.row_id, Ref(val_ids)), [:time, :BD, :SOCconc, :CF, :SOCdensity, names_cov...]]
 
 # CSV.write(joinpath(@__DIR__, "data/lucas_train.csv"), train)
 # CSV.write(joinpath(@__DIR__, "data/lucas_test.csv"), test)
-CSV.write(joinpath(@__DIR__, "data/lucas_test_texture.csv"), test_texture)
+# CSV.write(joinpath(@__DIR__, "data/lucas_test_texture.csv"), test_texture)
 
 # # plot BD vs SOCconc
 # bd_lims = extrema(skipmissing(df[:, "BD"]))      
