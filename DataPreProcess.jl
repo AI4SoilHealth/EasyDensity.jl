@@ -11,8 +11,8 @@ println(size(df_o));
 ## target: BD g/cm3, SOCconc g/kg, CF [0,1]
 target_names = [:BD, :SOCconc, :CF, :SOCdensity];
 rename!(df_o, :bulk_density_fe => :BD, :soc => :SOCconc, :coarse_vol => :CF); # rename as in hybrid model
-df_o[!, :SOCconc] .= df_o[!, :SOCconc] ./ 1000; # convert to fraction, [0,1]
-df_o[!,:SOCdensity] = df_o.BD .* df_o.SOCconc .* (1 .- df_o.CF); # SOCdensity g/cm3
+# df_o[!, :SOCconc] .= df_o[!, :SOCconc]; # stay as g/kg
+df_o[!,:SOCdensity] = df_o.BD .* df_o.SOCconc .* (1 .- df_o.CF); # SOCdensity kg/cm3
 
 coords = collect(zip(df_o.lat, df_o.lon))
 
@@ -126,18 +126,18 @@ CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed_v20251103.csv"), df_o)
 # )   
 # savefig(plt, joinpath(@__DIR__, "./eval/00_truth_BD.vs.SOCconc.png"))
 
-# # check distribution of BD, SOCconc, CF
-# for col in ["BD", "SOCconc", "CF", "SOCdensity"]
-#     # values = log10.(df[:, col])
-#     values = df_o[:, col]
-#     histogram(
-#         values;
-#         bins = 50,
-#         xlabel = col,
-#         ylabel = "Frequency",
-#         title = "Histogram of $col",
-#         lw = 1,
-#         legend = false
-#     )
-#     savefig(joinpath(@__DIR__, "./eval/histogram_$col.png"))
-# end
+# check distribution of BD, SOCconc, CF
+for col in ["BD", "SOCconc", "CF", "SOCdensity"]
+    # values = log10.(df[:, col])
+    values = df_o[:, col]
+    histogram(
+        values;
+        bins = 50,
+        xlabel = col,
+        ylabel = "Frequency",
+        title = "Histogram of $col",
+        lw = 1,
+        legend = false
+    )
+    savefig(joinpath(@__DIR__, "./eval/histogram_$col.png"))
+end
