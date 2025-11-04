@@ -14,16 +14,8 @@ using Statistics
 using Plots
 using JLD2
 using CairoMakie
-using OhMyThreads
-
-# --- detect SLURM array index (optional) ---
-id = isempty(ARGS) ? 0 : parse(Int, ARGS[1])
-println("→ SLURM job array index: $id")
-
-# --- detect number of threads (from SLURM) ---
-cpus = parse(Int, get(ENV, "JULIA_NUM_THREADS", "1"))
-println("→ Julia detected $cpus threads for parallel processing.")
-
+# using OhMyThreads
+using Base.Threads
 
 # 04 - hybrid
 testid = "04a_hybridBD";
@@ -103,14 +95,18 @@ activations = [relu, tanh, swish, gelu];
 # cross-validation
 k = 5;
 folds = make_folds(df, k = k, shuffle = true);
-all_results = DataFrame()
+rlt_list_param = Vector{DataFrame}(undef, k)
+rlt_list_pred = Vector{DataFrame}(undef, k)  
 
-@time @tasks for test_fold in 1:k
+@info "Threads available: $(Threads.nthreads())"
+@time Threads.@threads for test_fold in 1:k
     @info "Training outer fold $test_fold of $k on thread $(threadid())"
 
     train_folds = setdiff(1:k, test_fold)
     train_idx = findall(in(train_folds), folds)
+    train_df = df[train_idx, :]
     test_idx  = findall(==(test_fold), folds)
+    test_df = df[test_idx, :]
 
     # track best config for this outer fold
     best_val_loss = Inf
@@ -138,14 +134,14 @@ all_results = DataFrame()
         )
 
         rlt = train(
-            hm_local, df[train_idx, :], (:oBD, :mBD);
+            hm_local, train_df, ();
             nepochs = 200,
             batchsize = bs,
             opt = AdamW(lr),
             training_loss = :r2,
             loss_types = [:mse, :r2],
             shuffleobs = true,
-            file_name = nothing,
+            file_name = "model_$(testid)_$(test_fold).jld2",
             random_seed = 42,
             patience = 10,
             yscale = identity,
@@ -165,34 +161,41 @@ all_results = DataFrame()
     end
 
     # register best hyper paramets
-    push!(results_param, (
+    local_results_param = DataFrame(
         h = string(best_config.h),
         bs = best_config.bs,
         lr = best_config.lr,
         act = string(best_config.act),
         val_loss = best_val_loss,
         test_fold = test_fold
-    ))
-    append!(all_results, results_param)
+    ) |> DataFrame
 
-    (x_test,  y_test)  = prepare_data(best_hm, df[test_idx, :])
+    rlt_list_param[test_fold] = local_results_param
+    
+
+    (x_test,  y_test)  = prepare_data(best_hm, test_df)
     ps, st = best_result.ps, best_result.st
     ŷ_test, st_test = best_hm(x_test, ps, LuxCore.testmode(st))
 
     ŷ_df = toDataFrame(ŷ_test, targets)
     for tgt in target_names
-        df[test_idx, "pred_$(tgt)"] = ŷ_df[:, tgt] 
+        test_df["pred_$(tgt)"] = ŷ_df[:, tgt] 
     end
     param_names = [:oBD, :mBD]
     for p in param_names
         if hasproperty(ŷ_test, p)
-            df[test_idx, Symbol("fitted_", p)] = getproperty(ŷ_test, p)
+            test_df[Symbol("fitted_", p)] = getproperty(ŷ_test, p)
         end
     end
+    rlt_list_pred[test_fold] = test_df
+
 end
 
-CSV.write(joinpath(results_dir, "$(testid)_cv.pred.csv"), df)
-CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), all_results)
+rlt_param = vcat(rlt_list_param...)
+rlt_pred = vcat(rlt_list_pred...)
+
+CSV.write("$(testid)_cv.pred.csv", rlt_pred)
+CSV.write("$(testid)_hyperparams.csv", rlt_param)
 
 
 # # helper for metrics calculation
