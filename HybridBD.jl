@@ -141,7 +141,7 @@ rlt_list_pred = Vector{DataFrame}(undef, k)
             training_loss = :mse,
             loss_types = [:mse, :r2],
             shuffleobs = true,
-            file_name = "model_$(testid)_$(test_fold).jld2",
+            file_name = "history_$(testid)_fold$(test_fold).jld2",
             random_seed = 42,
             patience = 15,
             yscale = identity,
@@ -150,7 +150,7 @@ rlt_list_pred = Vector{DataFrame}(undef, k)
             return_model = :best,
             show_progress = false,
             plotting = false,
-            hybrid_name = "fold$(test_fold)" 
+            hybrid_name = "fold$(test_fold)_$(testid)" 
         )
 
         if rlt.best_loss < best_val_loss
@@ -202,8 +202,8 @@ end
 rlt_param = vcat(rlt_list_param...)
 rlt_pred = vcat(rlt_list_pred...)
 
-CSV.write("$(testid)_cv.pred.csv", rlt_pred)
-CSV.write("$(testid)_hyperparams.csv", rlt_param)
+CSV.write(joinpath(results_dir, "$(testid)_cv.pred.csv"), rlt_pred)
+CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), rlt_param)
 
 
 # # helper for metrics calculation
