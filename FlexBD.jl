@@ -18,12 +18,10 @@ using JLD2
 # 06 - flexiable BD, both oBD and mBD will be learnt by NN
 testid = "06_flexBD";
 results_dir = joinpath(@__DIR__, "eval");
+target_names = [:BD, :SOCconc, :CF, :SOCdensity];
 
 # input
-train_df = CSV.read(joinpath(@__DIR__, "data/lucas_train.csv"), DataFrame; normalizenames=true)
-# train_df = dropmissing(train_df)
-test_df = CSV.read(joinpath(@__DIR__, "data/lucas_test.csv"), DataFrame; normalizenames=true)
-test_df = dropmissing(test_df)
+df = CSV.read(joinpath(@__DIR__, "data/lucas_preprocessed_v20251103.csv"), DataFrame; normalizenames=true)
 
 # scales
 scalers = Dict(
@@ -32,24 +30,27 @@ scalers = Dict(
     :BD        => 0.53,
     :SOCdensity => 0.165, # log(x*1000)*0.165
 );
-for tgt in [:BD, :CF, :SOCconc, :SOCdensity]
+
+for tgt in target_names
+    # println(tgt, "------------")
+    # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
     if tgt in (:SOCdensity, :SOCconc)
-        train_df[!, tgt] .= log.(train_df[!, tgt] .* 1000)
-        test_df[!, tgt]  .= log.(test_df[!, tgt] .* 1000)
+        df[!, tgt] .= log.(df[!, tgt])
+        # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
     end
-    train_df[!, tgt] .= train_df[!, tgt] .* scalers[tgt]
-    test_df[!, tgt]  .= test_df[!, tgt] .* scalers[tgt]
+    df[!, tgt] .= df[!, tgt] .* scalers[tgt]
+    # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
 end
 
 # mechanistic model
 function SOCD_model(; SOCconc, CF, oBD, mBD)
-    soct = exp.(SOCconc ./ 0.158) ./ 1000  # back to fraction
-    cft = CF ./ 2.2                     # back to fraction
+    soct = exp.(SOCconc ./ scalers[:SOCconc]) ./ 1000 # to fraction
+    cft = CF ./ scalers[:CF]   # back to fraction
     BD = (oBD .* mBD) ./ (1.724f0 .* soct .* mBD .+ (1f0 .- 1.724f0 .* soct) .* oBD)
-    SOCdensity = soct .* BD .* (1 .- cft)
+    SOCdensity = soct .*1000 .* BD .* (1 .- cft) # kg/m3
     
-    SOCdensity = log.(SOCdensity .* 1000) .* 0.165  # scale to ~[0,1]
-    BD = BD .* 0.53  # scale to ~[0,1]
+    SOCdensity = log.(SOCdensity) .* scalers[:SOCdensity]  # scale to ~[0,1]
+    BD = BD .* scalers[:BD]  # scale to ~[0,1]
     return (; BD, SOCconc, CF, SOCdensity, oBD, mBD)  # supervise both BD and SOCconc
 end
 
@@ -67,283 +68,316 @@ neural_param_names = [:SOCconc, :CF, :mBD, :oBD]
 forcing = Symbol[]
 targets = [:BD, :SOCconc, :SOCdensity, :CF]       # SOCconc is both a param and a target
 
-# just exclude targets explicitly to be safe
-predictors = Symbol.(names(train_df))[5:end-1]; # first 3 and last 1
+# predictor
+predictors = Symbol.(names(df))[19:end-2]; # CHECK EVERY TIME 
 nf = length(predictors)
 
 # search space
-batch_sizes = [32, 64, 128, 256, 512];
-lrs = [1e-3, 1e-4];
-acts = [swish, gelu];
+hidden_configs = [ 
+    (512, 256, 128, 64, 32, 16),
+    (512, 256, 128, 64, 32), 
+    (256, 128, 64, 32, 16),
+    (256, 128, 64, 32),
+    (256, 128, 64),
+    (128, 64, 32, 16),
+    (128, 64, 32),
+    (128, 64),
+    (64, 32, 16)
+];
+batch_sizes = [128, 256, 512];
+lrs = [1e-3, 5e-4, 1e-4];
+activations = [relu, tanh, swish, gelu];
 
-# store results
-results = []
-best_r2 = -Inf
-best_bundle = nothing
 
-for bs in batch_sizes, lr in lrs, act in acts
-    @info "Testing bs=$(bs), lr=$(lr), act=$(act)"
+# cross-validation
+k = 5;
+folds = make_folds(df, k = k, shuffle = true);
+rlt_list_param = Vector{DataFrame}(undef, k)
+rlt_list_pred = Vector{DataFrame}(undef, k)  
 
-    hm = constructHybridModel(
-        predictors,              # single NN uses a Vector of predictors
-        forcing,
-        targets,
-        SOCD_model,
-        parameters,
-        neural_param_names,
-        [];     
-        hidden_layers = [256, 128, 64, 32, 16],
-        activation    = act,
-        scale_nn_outputs = true,
-        input_batchnorm = true,
-        start_from_default = true
-    )
+@info "Threads available: $(Threads.nthreads())"
+@time Threads.@threads for test_fold in 1:k
+    @info "Training outer fold $test_fold of $k on thread $(threadid())"
 
-    # prepare data....
-    (x_train, y_train) = EasyHybrid.prepare_data(hm, train_df)
-    (x_val,   y_val)   = EasyHybrid.prepare_data(hm, test_df)
+    train_folds = setdiff(1:k, test_fold)
+    train_idx = findall(in(train_folds), folds)
+    train_df = df[train_idx, :]
+    test_idx  = findall(==(test_fold), folds)
+    test_df = df[test_idx, :]
 
-    res = train(
-        hm, ((x_train, y_train), (x_val, y_val)), ();  
-        nepochs = 200,
-        batchsize = bs,
-        opt = AdamW(lr),
-        training_loss = :mse,
-        loss_types = [:mse, :r2],
-        shuffleobs = true,
-        file_name = nothing,
-        random_seed = 42,
-        patience = 20,
-        yscale = identity,
-        monitor_names = [:oBD, :mBD],
-        agg = mean,
-        return_model = :best,
-        plotting = false
-    )
+    # track best config for this outer fold
+    best_val_loss = Inf
+    best_config = nothing
+    best_result = nothing
+    best_hm = nothing
+    results_param = DataFrame(h=String[], bs=Int[], lr=Float64[], act=String[], r2=Float64[], mse=Float64[], best_epoch=Int[], test_fold=Int[])
 
-    # retrieve the best epoch metrics: mse and r2
-    agg_name = Symbol("mean") 
-    r2s  = map(vh -> getproperty(vh, agg_name),  res.val_history.r2)
-    mses = map(vh -> getproperty(vh, agg_name), res.val_history.mse)
-    best_idx = findmax(r2s)[2]   # index of best r2
-    best_r2_here = r2s[best_idx]
-    best_mse_here = mses[best_idx]
+    for h in hidden_configs, bs in batch_sizes, lr in lrs, act in activations
+        println("Testing h=$h, bs=$bs, lr=$lr, activation=$act")
 
-    push!(results, (bs, lr, act, best_r2_here, best_mse_here, best_idx))
-
-    # keep the whole bundle if better
-    if !isnan(best_r2_here) && best_r2_here > best_r2
-        best_r2 = best_r2_here
-
-        # per-sample mBD
-        mBD_phys = (hasproperty(res, :val_diffs) && hasproperty(res.val_diffs, :mBD)) ?
-                collect(res.val_diffs.mBD) : nothing
-
-        # per-sample oBD
-        oBD_phys = (hasproperty(res, :val_diffs) && hasproperty(res.val_diffs, :oBD)) ?
-                collect(res.val_diffs.oBD) : nothing
-
-        best_bundle = (
-            ps = deepcopy(res.ps),
-            st = deepcopy(res.st),
-            model = hm,
-            val_obs_pred = deepcopy(res.val_obs_pred),
-            val_diffs = hasproperty(res, :val_diffs) ? deepcopy(res.val_diffs) : nothing,
-            meta = (bs=bs, lr=lr, act=act, best_epoch=best_idx,
-                    r2=best_r2_here, mse=best_mse_here),
-            # convenience fields
-            oBD_physical = oBD_phys,
-            # oBD_unconstr = oBD_raw,
-            mBD_phys = mBD_phys
+        hm_local = constructHybridModel(
+            predictors,
+            forcing,
+            targets,
+            SOCD_model,
+            parameters,
+            neural_param_names,
+            [];
+            hidden_layers = collect(h),
+            activation = act,
+            scale_nn_outputs = true,
+            input_batchnorm = true,
+            start_from_default = true
         )
+
+        rlt = train(
+            hm_local, train_df, ();
+            nepochs = 200,
+            batchsize = bs,
+            opt = AdamW(lr),
+            training_loss = :mse,
+            loss_types = [:mse, :r2],
+            shuffleobs = true,
+            file_name = "model_$(testid)_fold$(test_fold).jld2",
+            random_seed = 42,
+            patience = 15,
+            yscale = identity,
+            monitor_names = [:oBD, :mBD],
+            agg = mean,
+            return_model = :best,
+            show_progress = false,
+            plotting = false,
+            hybrid_name = "fold$(test_fold)_$(testid)" 
+        )
+
+        if rlt.best_loss < best_val_loss
+            best_config = (h=h, bs=bs, lr=lr, act=act)
+            best_result = rlt
+            best_hm = deepcopy(hm_local)
+        end
     end
-end
 
-df_results = DataFrame(
-    batch_size    = [r[1] for r in results],
-    learning_rate = [r[2] for r in results],
-    activation    = [string(r[3]) for r in results],
-    r2            = [r[4] for r in results],
-    mse           = [r[5] for r in results],
-    best_epoch    = [r[6] for r in results]
-)
+    # register best hyper paramets
+    agg_name = Symbol("mean")
+    r2s  = map(vh -> getproperty(vh, agg_name), rlt.val_history.r2)
+    mses = map(vh -> getproperty(vh, agg_name), rlt.val_history.mse)
+    best_epoch = rlt.best_epoch
 
-out_file = joinpath(results_dir, "$(testid)_parameter_search.csv")
-CSV.write(out_file, df_results)
+    local_results_param = DataFrame(
+        h = string(best_config.h),
+        bs = best_config.bs,
+        lr = best_config.lr,
+        act = string(best_config.act),
+        r2 = r2s[best_epoch],
+        mse = mses[best_epoch],
+        best_epoch = best_epoch,
+        test_fold = test_fold
+    )
+    rlt_list_param[test_fold] = local_results_param
+    
 
-# print best model
-@assert best_bundle !== nothing "No valid model found for $testid"
-bm = best_bundle
-file_path = joinpath(results_dir, "$(testid)_best_model.jld2")
-jldsave(file_path;
-    ps=best_bundle.ps, st=best_bundle.st, model=best_bundle.model,
-    val_obs_pred=best_bundle.val_obs_pred, val_diffs=best_bundle.val_diffs,
-    meta=best_bundle.meta,
-    mBD_phys=best_bundle.mBD_phys,
-    oBD_physical=best_bundle.oBD_physical,      # use the actual field
-)
+    (x_test,  y_test)  = prepare_data(best_hm, test_df)
+    ps, st = best_result.ps, best_result.st
+    ŷ_test, st_test = best_hm(x_test, ps, LuxCore.testmode(st))
+    println(propertynames(ŷ_test))
+    println(propertynames(ŷ_test.parameters))
 
-# @load joinpath(results_dir, "best_model_$(tgt).jld2") ps st model val_obs_pred meta
-@info "Best for $testid: bs=$(bm.meta.bs), lr=$(bm.meta.lr), act=$(bm.meta.act), epoch=$(bm.meta.best_epoch), R2=$(round(best_r2, digits=4))"
+    for var in [:BD, :SOCconc, :CF, :SOCdensity, :oBD, :mBD]
+        if hasproperty(ŷ_test, var)
+            val = getproperty(ŷ_test, var)
 
-# load predictions
-jld = joinpath(results_dir, "$(testid)_best_model.jld2")
-@assert isfile(jld) "Missing $(jld). Did you train & save best model for $(tname)?"
-@load jld val_obs_pred meta
-# split output table
-val_tables = Dict{Symbol,Vector{Float64}}()
-for t in targets
-    # expected: t (true), t_pred (pred), and maybe :index if the framework saved it
-    have_pred = Symbol(t, :_pred)
-    req = Set((t, have_pred))
-    @assert issubset(req, Symbol.(names(val_obs_pred))) "val_obs_pred missing $(collect(req)) for $(t). Columns: $(names(val_obs_pred))"
-    val_tables[t] = val_obs_pred[:, t]./ scalers[t]
-    val_tables[have_pred] = val_obs_pred[:, have_pred]./ scalers[t]
-    if t in (:SOCdensity, :SOCconc)
-        val_tables[Symbol("$(t)_pred")] = exp.(val_tables[Symbol("$(t)_pred")]) ./ 1000
-        val_tables[t] = exp.(val_tables[t]) ./ 1000
+            if val isa AbstractVector && length(val) == nrow(test_df)
+                test_df[!, Symbol("pred_", var)] = val # per row
+
+            elseif (val isa Number) || (val isa AbstractVector && length(val) == 1)
+                test_df[!, Symbol("pred_", var)] = fill(Float32(val isa AbstractVector ? first(val) : val), nrow(test_df))
+            end
+
+
+        end
     end
+    
+    rlt_list_pred[test_fold] = test_df
+
 end
 
 
-# helper for metrics calculation
-r2_mse(y_true, y_pred) = begin
-    ss_res = sum((y_true .- y_pred).^2)
-    ss_tot = sum((y_true .- mean(y_true)).^2)
-    r2  = 1 - ss_res / ss_tot
-    mse = mean((y_true .- y_pred).^2)
-    (r2, mse)
-end
+CSV.write(joinpath(results_dir, "$(testid)_cv.pred.csv"), rlt_pred)
+CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), rlt_param)
 
-# accuracy plots for SOCconc, BD, CF in original space
-for tname in targets
-    y_val_true = val_tables[tname]
-    y_val_pred = val_tables[Symbol("$(tname)_pred")]
+# # print best model
+# @assert best_bundle !== nothing "No valid model found for $testid"
+# bm = best_bundle
+# file_path = joinpath(results_dir, "$(testid)_best_model.jld2")
+# jldsave(file_path;
+#     ps=best_bundle.ps, st=best_bundle.st, model=best_bundle.model,
+#     val_obs_pred=best_bundle.val_obs_pred, val_diffs=best_bundle.val_diffs,
+#     meta=best_bundle.meta,
+#     mBD_phys=best_bundle.mBD_phys,
+#     oBD_physical=best_bundle.oBD_physical,      # use the actual field
+# )
 
-    # @assert all(in(Symbol.(names(df_out))).([tname, Symbol("$(tname)_pred")])) "Expected columns $(tname) and $(tname)_pred in saved val table."
+# # @load joinpath(results_dir, "best_model_$(tgt).jld2") ps st model val_obs_pred meta
+# @info "Best for $testid: bs=$(bm.meta.bs), lr=$(bm.meta.lr), act=$(bm.meta.act), epoch=$(bm.meta.best_epoch), R2=$(round(best_r2, digits=4))"
 
-    r2, mse = r2_mse(y_val_true, y_val_pred)
-
-    plt = histogram2d(
-        y_val_pred, y_val_true;
-        nbins=(40, 40), cbar=true, xlab="Predicted", ylab="Observed",
-        title = string(tname, "\nR²=", round(r2, digits=3), ", MSE=", round(mse, digits=3)),
-        normalize=false
-    )
-    lims = extrema(vcat(y_val_true, y_val_pred))
-    Plots.plot!(plt, [lims[1], lims[2]], [lims[1], lims[2]];
-        color=:black, linewidth=2, label="1:1 line",
-        aspect_ratio=:equal, xlims=lims, ylims=lims
-    )
-    savefig(plt, joinpath(results_dir, "$(testid)_accuracy_$(tname).png"))
-end
-
-# BD vs SOCconc predictions
-plt = histogram2d(
-    val_tables[:BD_pred], val_tables[:SOCconc_pred];
-    nbins      = (30, 30),
-    cbar       = true,
-    xlab       = "BD",
-    ylab       = "SOCconc",
-    color      = cgrad(:bamako, rev=true),
-    normalize  = false,
-    size = (460, 400),
-    xlims     = (0, 1.8),
-    ylims     = (0, 0.6)
-)   
-savefig(plt, joinpath(results_dir, "$(testid)_BD.vs.SOCconc.png"));
-
-# save / print parameters: mBD and oBD
-@load jld oBD_physical
-histogram(oBD_physical; bins=:sturges, xlabel="learned oBD", ylabel="count",
-          title="Distribution of learned oBD", legend=false)
-vline!([mean(oBD_physical)]; lw=2, label=false)  # mean marker
-
-@load jld mBD_phys
-histogram(mBD_phys; bins=:sturges, xlabel="learned mBD", ylabel="count",
-          title="Distribution of learned mBD", legend=false)
-vline!([mean(mBD_phys)]; lw=2, label=false)  # mean marker
-@info "Saved histogram to $(joinpath(results_dir, "$(testid)_mBD_histogram.png"))"
-
-# plot mBD_phys and texture
-texture = CSV.read(joinpath(@__DIR__, "data/lucas_test_texture.csv"), DataFrame; normalizenames=true)
-texture.mBD_phys = mBD_phys
-texture.oBD_phys = oBD_physical
+# # load predictions
+# jld = joinpath(results_dir, "$(testid)_best_model.jld2")
+# @assert isfile(jld) "Missing $(jld). Did you train & save best model for $(tname)?"
+# @load jld val_obs_pred meta
+# # split output table
+# val_tables = Dict{Symbol,Vector{Float64}}()
+# for t in targets
+#     # expected: t (true), t_pred (pred), and maybe :index if the framework saved it
+#     have_pred = Symbol(t, :_pred)
+#     req = Set((t, have_pred))
+#     @assert issubset(req, Symbol.(names(val_obs_pred))) "val_obs_pred missing $(collect(req)) for $(t). Columns: $(names(val_obs_pred))"
+#     val_tables[t] = val_obs_pred[:, t]./ scalers[t]
+#     val_tables[have_pred] = val_obs_pred[:, have_pred]./ scalers[t]
+#     if t in (:SOCdensity, :SOCconc)
+#         val_tables[Symbol("$(t)_pred")] = exp.(val_tables[Symbol("$(t)_pred")]) ./ 1000
+#         val_tables[t] = exp.(val_tables[t]) ./ 1000
+#     end
+# end
 
 
-for col in (:clay, :silt, :sand)
-    p = Plots.scatter(texture[!, col], texture.BD; label="BD", xlabel=String(col), ylabel="Density", legend=:topleft)
-    Plots.scatter!(texture[!, col], texture.mBD_phys; label="mBD_phys")
-    title!(p, "$(col) vs density")
-    display(p)
-    # savefig("$(col)_vs_density.png")   # or display without saving
-end
+# # helper for metrics calculation
+# r2_mse(y_true, y_pred) = begin
+#     ss_res = sum((y_true .- y_pred).^2)
+#     ss_tot = sum((y_true .- mean(y_true)).^2)
+#     r2  = 1 - ss_res / ss_tot
+#     mse = mean((y_true .- y_pred).^2)
+#     (r2, mse)
+# end
 
-# drop rows with missings in these columns
-tex = dropmissing(texture, [:clay, :sand, :BD, :mBD_phys])
+# # accuracy plots for SOCconc, BD, CF in original space
+# for tname in targets
+#     y_val_true = val_tables[tname]
+#     y_val_pred = val_tables[Symbol("$(tname)_pred")]
 
-# BD plot
-p1 = Plots.scatter(tex.clay, tex.sand;
-    zcolor = tex.BD,
-    xlabel = "Clay",
-    ylabel = "Sand",
-    # colorbar_title = "BD",
-    title = "observed BD",
-    legend = false,
-    colorbar = true,
-    color = cgrad(:algae),
-    # clim = (cmin, cmax),
-    markersize = 2.5, markerstrokewidth = 0,
-    aspect_ratio = :equal)
+#     # @assert all(in(Symbol.(names(df_out))).([tname, Symbol("$(tname)_pred")])) "Expected columns $(tname) and $(tname)_pred in saved val table."
 
-# mBD_phys plot
-p2 = Plots.scatter(tex.clay, tex.sand;
-    zcolor = tex.mBD_phys,
-    xlabel = "Clay",
-    ylabel = "Sand",
-    # colorbar_title = "mBD_phys",
-    title = "mineral BD",
-    legend = false,
-    colorbar = true,
-    color = cgrad(:dense),
-    # clim = (cmin, cmax),
-    markersize = 2.5, markerstrokewidth = 0,
-    aspect_ratio = :equal)
+#     r2, mse = r2_mse(y_val_true, y_val_pred)
 
-# oBD_phys
-p3 = Plots.scatter(tex.clay, tex.sand;
-    zcolor = tex.oBD_phys,
-    xlabel = "Clay",
-    ylabel = "Sand",
-    # colorbar_title = "mBD_phys",
-    title = "organic BD",
-    legend = false,
-    colorbar = true,
-    color = cgrad(:solar, rev=true),
-    # clim = (cmin, cmax),
-    markersize = 2.5, markerstrokewidth = 0,
-    aspect_ratio = :equal)
+#     plt = histogram2d(
+#         y_val_pred, y_val_true;
+#         nbins=(40, 40), cbar=true, xlab="Predicted", ylab="Observed",
+#         title = string(tname, "\nR²=", round(r2, digits=3), ", MSE=", round(mse, digits=3)),
+#         normalize=false
+#     )
+#     lims = extrema(vcat(y_val_true, y_val_pred))
+#     Plots.plot!(plt, [lims[1], lims[2]], [lims[1], lims[2]];
+#         color=:black, linewidth=2, label="1:1 line",
+#         aspect_ratio=:equal, xlims=lims, ylims=lims
+#     )
+#     savefig(plt, joinpath(results_dir, "$(testid)_accuracy_$(tname).png"))
+# end
 
-finalplot = Plots.plot(p1, p2, p3, layout=(1,3), size=(1350,450))
-display(finalplot)
-savefig(finalplot, joinpath(results_dir, "$(testid)_texture.vs.BD.png")) 
+# # BD vs SOCconc predictions
+# plt = histogram2d(
+#     val_tables[:BD_pred], val_tables[:SOCconc_pred];
+#     nbins      = (30, 30),
+#     cbar       = true,
+#     xlab       = "BD",
+#     ylab       = "SOCconc",
+#     color      = cgrad(:bamako, rev=true),
+#     normalize  = false,
+#     size = (460, 400),
+#     xlims     = (0, 1.8),
+#     ylims     = (0, 0.6)
+# )   
+# savefig(plt, joinpath(results_dir, "$(testid)_BD.vs.SOCconc.png"));
 
-# 2D histograms
-p1 = histogram2d(tex.clay, tex.BD; xlabel="Clay (%)", ylabel="Observed BD",
-    bins=40, color=cgrad(:thermal, rev=true), legend=false)
-p2 = histogram2d(tex.clay, tex.mBD_phys; xlabel="Clay (%)", ylabel="Mineral BD",
-    bins=40, color=cgrad(:thermal, rev=true), legend=false)
-p3 = histogram2d(tex.clay, tex.oBD_phys; xlabel="Clay (%)", ylabel="Organic BD",
-    bins=40, color=cgrad(:thermal, rev=true), legend=false)
+# # save / print parameters: mBD and oBD
+# @load jld oBD_physical
+# histogram(oBD_physical; bins=:sturges, xlabel="learned oBD", ylabel="count",
+#           title="Distribution of learned oBD", legend=false)
+# vline!([mean(oBD_physical)]; lw=2, label=false)  # mean marker
 
-# combine and add simple padding around edges
-finalplot = Plots.plot(p1, p2, p3;
-    layout = (1,3),
-    size = (1500, 500),
-    margin = 7Plots.mm)   # ← simplest way to add breathing room
+# @load jld mBD_phys
+# histogram(mBD_phys; bins=:sturges, xlabel="learned mBD", ylabel="count",
+#           title="Distribution of learned mBD", legend=false)
+# vline!([mean(mBD_phys)]; lw=2, label=false)  # mean marker
+# @info "Saved histogram to $(joinpath(results_dir, "$(testid)_mBD_histogram.png"))"
 
-display(finalplot)
-savefig(finalplot, joinpath(results_dir, "$(testid)_clay.vs.BD.png")) 
+# # plot mBD_phys and texture
+# texture = CSV.read(joinpath(@__DIR__, "data/lucas_test_texture.csv"), DataFrame; normalizenames=true)
+# texture.mBD_phys = mBD_phys
+# texture.oBD_phys = oBD_physical
+
+
+# for col in (:clay, :silt, :sand)
+#     p = Plots.scatter(texture[!, col], texture.BD; label="BD", xlabel=String(col), ylabel="Density", legend=:topleft)
+#     Plots.scatter!(texture[!, col], texture.mBD_phys; label="mBD_phys")
+#     title!(p, "$(col) vs density")
+#     display(p)
+#     # savefig("$(col)_vs_density.png")   # or display without saving
+# end
+
+# # drop rows with missings in these columns
+# tex = dropmissing(texture, [:clay, :sand, :BD, :mBD_phys])
+
+# # BD plot
+# p1 = Plots.scatter(tex.clay, tex.sand;
+#     zcolor = tex.BD,
+#     xlabel = "Clay",
+#     ylabel = "Sand",
+#     # colorbar_title = "BD",
+#     title = "observed BD",
+#     legend = false,
+#     colorbar = true,
+#     color = cgrad(:algae),
+#     # clim = (cmin, cmax),
+#     markersize = 2.5, markerstrokewidth = 0,
+#     aspect_ratio = :equal)
+
+# # mBD_phys plot
+# p2 = Plots.scatter(tex.clay, tex.sand;
+#     zcolor = tex.mBD_phys,
+#     xlabel = "Clay",
+#     ylabel = "Sand",
+#     # colorbar_title = "mBD_phys",
+#     title = "mineral BD",
+#     legend = false,
+#     colorbar = true,
+#     color = cgrad(:dense),
+#     # clim = (cmin, cmax),
+#     markersize = 2.5, markerstrokewidth = 0,
+#     aspect_ratio = :equal)
+
+# # oBD_phys
+# p3 = Plots.scatter(tex.clay, tex.sand;
+#     zcolor = tex.oBD_phys,
+#     xlabel = "Clay",
+#     ylabel = "Sand",
+#     # colorbar_title = "mBD_phys",
+#     title = "organic BD",
+#     legend = false,
+#     colorbar = true,
+#     color = cgrad(:solar, rev=true),
+#     # clim = (cmin, cmax),
+#     markersize = 2.5, markerstrokewidth = 0,
+#     aspect_ratio = :equal)
+
+# finalplot = Plots.plot(p1, p2, p3, layout=(1,3), size=(1350,450))
+# display(finalplot)
+# savefig(finalplot, joinpath(results_dir, "$(testid)_texture.vs.BD.png")) 
+
+# # 2D histograms
+# p1 = histogram2d(tex.clay, tex.BD; xlabel="Clay (%)", ylabel="Observed BD",
+#     bins=40, color=cgrad(:thermal, rev=true), legend=false)
+# p2 = histogram2d(tex.clay, tex.mBD_phys; xlabel="Clay (%)", ylabel="Mineral BD",
+#     bins=40, color=cgrad(:thermal, rev=true), legend=false)
+# p3 = histogram2d(tex.clay, tex.oBD_phys; xlabel="Clay (%)", ylabel="Organic BD",
+#     bins=40, color=cgrad(:thermal, rev=true), legend=false)
+
+# # combine and add simple padding around edges
+# finalplot = Plots.plot(p1, p2, p3;
+#     layout = (1,3),
+#     size = (1500, 500),
+#     margin = 7Plots.mm)   # ← simplest way to add breathing room
+
+# display(finalplot)
+# savefig(finalplot, joinpath(results_dir, "$(testid)_clay.vs.BD.png")) 
 
 # # MTD SOCdensity
 # socdensity_pred = val_tables[:SOCconc_pred] .* val_tables[:BD_pred] .* (1 .- val_tables[:CF_pred]);

@@ -72,9 +72,20 @@ predictors = Symbol.(names(train_df))[5:end-1]; # first 3 and last 1
 nf = length(predictors)
 
 # search space
-batch_sizes = [32, 64, 128, 256, 512];
-lrs = [1e-3, 1e-4];
-acts = [swish, gelu];
+hidden_configs = [ 
+    (512, 256, 128, 64, 32, 16),
+    (512, 256, 128, 64, 32), 
+    (256, 128, 64, 32, 16),
+    (256, 128, 64, 32),
+    (256, 128, 64),
+    (128, 64, 32, 16),
+    (128, 64, 32),
+    (128, 64),
+    (64, 32, 16)
+];
+batch_sizes = [128, 256, 512];
+lrs = [1e-3, 5e-4, 1e-4];
+activations = [relu, tanh, swish, gelu];
 
 # store results
 results = []
