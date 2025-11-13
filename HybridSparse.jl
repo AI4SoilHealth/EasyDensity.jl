@@ -15,8 +15,8 @@ using Plots
 using JLD2
 # using CairoMakie
 
-# 06 - flexiable BD, both oBD and mBD will be learnt by NN
-testid = "06_flexBD";
+# 05 -  hybrid and sparse
+testid = "05_hybridsparse";
 results_dir = joinpath(@__DIR__, "eval");
 target_names = [:BD, :SOCconc, :CF, :SOCdensity];
 
@@ -27,7 +27,7 @@ df = CSV.read(joinpath(@__DIR__, "data/lucas_preprocessed_v20251103.csv"), DataF
 scalers = Dict(
     :SOCconc   => 0.158, # log(x*1000)*0.158
     :CF        => 2.2,
-    :BD        => 0.53, # NOTE: should be changed to 0.52
+    :BD        => 0.52,
     :SOCdensity => 0.165, # log(x*1000)*0.165
 );
 
@@ -58,18 +58,18 @@ end
 parameters = (
     SOCconc = (0.01f0, 0.0f0, 1.0f0),   # fraction
     CF      = (0.15f0, 0.0f0, 1.0f0),   # fraction,
-    oBD     = (0.20f0, 0.05f0, 0.40f0),  # also NN learnt, g/cm3
-    mBD     = (1.20f0, 0.75f0, 2.0f0),  # NN leanrt
+    oBD     = (0.20f0, 0.05f0, 0.40f0),  # g/cm^3
+    mBD     = (1.20f0, 0.75f0, 2.0f0),  # global
 )
 
 # define param for hybrid model
-neural_param_names = [:SOCconc, :CF, :mBD, :oBD]
-# global_param_names = [:oBD]
+neural_param_names = [:SOCconc, :CF, :mBD]
+global_param_names = [:oBD]
 forcing = Symbol[]
-targets = [:BD, :SOCconc, :SOCdensity, :CF]       # SOCconc is both a param and a target
+targets = [:BD, :SOCconc, :SOCdensity, :CF]  # SOCconc is both a param and a target
 
 # predictor
-predictors = Symbol.(names(df))[19:end-2]; # CHECK EVERY TIME 
+predictors = Symbol.(names(df))[19:end-2] # CHECK EVERY TIME 
 nf = length(predictors)
 
 # search space
@@ -87,7 +87,6 @@ hidden_configs = [
 batch_sizes = [128, 256, 512];
 lrs = [1e-3, 5e-4, 1e-4];
 activations = [relu, tanh, swish, gelu];
-
 
 # cross-validation
 k = 5;
@@ -208,21 +207,6 @@ rlt_pred = vcat(rlt_list_pred...)
 CSV.write(joinpath(results_dir, "$(testid)_cv.pred.csv"), rlt_pred)
 CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), rlt_param)
 
-# # print best model
-# @assert best_bundle !== nothing "No valid model found for $testid"
-# bm = best_bundle
-# file_path = joinpath(results_dir, "$(testid)_best_model.jld2")
-# jldsave(file_path;
-#     ps=best_bundle.ps, st=best_bundle.st, model=best_bundle.model,
-#     val_obs_pred=best_bundle.val_obs_pred, val_diffs=best_bundle.val_diffs,
-#     meta=best_bundle.meta,
-#     mBD_phys=best_bundle.mBD_phys,
-#     oBD_physical=best_bundle.oBD_physical,      # use the actual field
-# )
-
-# # @load joinpath(results_dir, "best_model_$(tgt).jld2") ps st model val_obs_pred meta
-# @info "Best for $testid: bs=$(bm.meta.bs), lr=$(bm.meta.lr), act=$(bm.meta.act), epoch=$(bm.meta.best_epoch), R2=$(round(best_r2, digits=4))"
-
 # # load predictions
 # jld = joinpath(results_dir, "$(testid)_best_model.jld2")
 # @assert isfile(jld) "Missing $(jld). Did you train & save best model for $(tname)?"
@@ -290,22 +274,20 @@ CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), rlt_param)
 # )   
 # savefig(plt, joinpath(results_dir, "$(testid)_BD.vs.SOCconc.png"));
 
-# # save / print parameters: mBD and oBD
+# # save / print parameters: mBD and per-sample oBD
+# # oBD global
 # @load jld oBD_physical
-# histogram(oBD_physical; bins=:sturges, xlabel="learned oBD", ylabel="count",
-#           title="Distribution of learned oBD", legend=false)
-# vline!([mean(oBD_physical)]; lw=2, label=false)  # mean marker
+# @info "Global oBD ≈ $(round(oBD_physical, digits=4))"
 
 # @load jld mBD_phys
 # histogram(mBD_phys; bins=:sturges, xlabel="learned mBD", ylabel="count",
 #           title="Distribution of learned mBD", legend=false)
 # vline!([mean(mBD_phys)]; lw=2, label=false)  # mean marker
-# @info "Saved histogram to $(joinpath(results_dir, "$(testid)_mBD_histogram.png"))"
+# @info "Saved histogram to $(joinpath(results_dir, "mBD_histogram.png"))"
 
 # # plot mBD_phys and texture
 # texture = CSV.read(joinpath(@__DIR__, "data/lucas_test_texture.csv"), DataFrame; normalizenames=true)
 # texture.mBD_phys = mBD_phys
-# texture.oBD_phys = oBD_physical
 
 
 # for col in (:clay, :silt, :sand)
@@ -318,6 +300,8 @@ CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), rlt_param)
 
 # # drop rows with missings in these columns
 # tex = dropmissing(texture, [:clay, :sand, :BD, :mBD_phys])
+# cmin = 0.7 #minimum(vcat(tex.BD, tex.mBD_phys))
+# cmax = 1.6 #maximum(vcat(tex.BD, tex.mBD_phys))
 
 # # BD plot
 # p1 = Plots.scatter(tex.clay, tex.sand;
@@ -329,7 +313,7 @@ CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), rlt_param)
 #     legend = false,
 #     colorbar = true,
 #     color = cgrad(:algae),
-#     # clim = (cmin, cmax),
+#     clim = (cmin, cmax),
 #     markersize = 2.5, markerstrokewidth = 0,
 #     aspect_ratio = :equal)
 
@@ -342,45 +326,14 @@ CSV.write(joinpath(results_dir, "$(testid)_hyperparams.csv"), rlt_param)
 #     title = "mineral BD",
 #     legend = false,
 #     colorbar = true,
-#     color = cgrad(:dense),
-#     # clim = (cmin, cmax),
+#     color = cgrad(:viridis, rev=true),
+#     clim = (cmin, cmax),
 #     markersize = 2.5, markerstrokewidth = 0,
 #     aspect_ratio = :equal)
 
-# # oBD_phys
-# p3 = Plots.scatter(tex.clay, tex.sand;
-#     zcolor = tex.oBD_phys,
-#     xlabel = "Clay",
-#     ylabel = "Sand",
-#     # colorbar_title = "mBD_phys",
-#     title = "organic BD",
-#     legend = false,
-#     colorbar = true,
-#     color = cgrad(:solar, rev=true),
-#     # clim = (cmin, cmax),
-#     markersize = 2.5, markerstrokewidth = 0,
-#     aspect_ratio = :equal)
-
-# finalplot = Plots.plot(p1, p2, p3, layout=(1,3), size=(1350,450))
+# finalplot = Plots.plot(p1, p2, layout=(1,2), size=(900,450))
 # display(finalplot)
 # savefig(finalplot, joinpath(results_dir, "$(testid)_texture.vs.BD.png")) 
-
-# # 2D histograms
-# p1 = histogram2d(tex.clay, tex.BD; xlabel="Clay (%)", ylabel="Observed BD",
-#     bins=40, color=cgrad(:thermal, rev=true), legend=false)
-# p2 = histogram2d(tex.clay, tex.mBD_phys; xlabel="Clay (%)", ylabel="Mineral BD",
-#     bins=40, color=cgrad(:thermal, rev=true), legend=false)
-# p3 = histogram2d(tex.clay, tex.oBD_phys; xlabel="Clay (%)", ylabel="Organic BD",
-#     bins=40, color=cgrad(:thermal, rev=true), legend=false)
-
-# # combine and add simple padding around edges
-# finalplot = Plots.plot(p1, p2, p3;
-#     layout = (1,3),
-#     size = (1500, 500),
-#     margin = 7Plots.mm)   # ← simplest way to add breathing room
-
-# display(finalplot)
-# savefig(finalplot, joinpath(results_dir, "$(testid)_clay.vs.BD.png")) 
 
 # # MTD SOCdensity
 # socdensity_pred = val_tables[:SOCconc_pred] .* val_tables[:BD_pred] .* (1 .- val_tables[:CF_pred]);
