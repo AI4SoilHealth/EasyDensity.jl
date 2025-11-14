@@ -6,3 +6,4 @@ Manifest.toml
 /output_tmp
 /eval
 /data
+.ipynb_checkpoints/
