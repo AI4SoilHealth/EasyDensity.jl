@@ -4,6 +4,8 @@ using EasyHybrid
 using EasyHybrid.MLUtils
 using Plots
 
+version = "v20251120"
+
 # ? move the `csv` file into the `BulkDSOC/data` folder (create folder)
 df_o = CSV.read(joinpath(@__DIR__, "./data/lucas_overlaid.csv"), DataFrame, normalizenames=true)
 println(size(df_o));
@@ -94,7 +96,11 @@ end
 
 df_o[!, target_names]    .= coalesce.(df_o[!, target_names], NaN)
 
-CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed_v20251103.csv"), df_o)
+df = df_o[df_o.hzn_dep .== 10, :]
+println(size(df))
+select!(df, Not(:hzn_dep))
+println(size(df))
+CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed_$version.csv"), df)
 
 # # split train and test
 # raw_val = dropmissing(df_o, target_names);
