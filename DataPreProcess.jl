@@ -5,17 +5,15 @@ using EasyHybrid.MLUtils
 using Plots
 using DataFrames
 using Statistics
-version = "v20251120"
+version = "v20251125"
 
 # ? move the `csv` file into the `BulkDSOC/data` folder (create folder)
-df_o = CSV.read(joinpath(@__DIR__, "./data/lucas_overlaid.csv"), DataFrame, normalizenames=true)
+df_o = CSV.read(joinpath(@__DIR__, "./data/lucas_overlaid.csv"), DataFrame, normalizenames=true);
 println(size(df_o));
 
-## target: BD g/cm3, SOCconc g/kg, CF [0,1]
-target_names = [:BD, :SOCconc, :CF, :SOCdensity];
-rename!(df_o, :bulk_density_fe => :BD, :soc => :SOCconc, :coarse_vol => :CF); # rename as in hybrid model
-# df_o[!, :SOCconc] .= df_o[!, :SOCconc]; # stay as g/kg
-df_o[!,:SOCdensity] = df_o.BD .* df_o.SOCconc .* (1 .- df_o.CF); # SOCdensity kg/cm3
+############################
+###### clean targets #######
+############################
 
 # filter horizon depth = 10 cm
 df_o = df_o[df_o.hzn_dep .== 10, :];
@@ -27,7 +25,7 @@ gdf = groupby(df_o, :id);
 df_o.maxdiff = fill(0.0, nrow(df_o));  # initialize noise column
 # compute max abs difference of SOCconc per id
 for sub in groupby(df_o, :id)
-    soc = sort(sub.SOCconc)
+    soc = sort(sub.soc)
 
     if length(soc) < 2
         maxdiff = -1
@@ -42,12 +40,13 @@ println(size(df_o))
 df_o = df_o[df_o.maxdiff .<= 50, :];
 println(size(df_o))
 
-coords = collect(zip(df_o.lat, df_o.lon));
+# coords = collect(zip(df_o.lat, df_o.lon));
 
+########################
+###### clean cov #######
+########################
 # t clean covariates
-names_cov = Symbol.(names(df_o))[18:end-2]
-# println("original cov number:", length(names_cov))
-# names_meta = Symbol.(names(df_o))[1:18]
+names_cov = Symbol.(names(df_o))[18:end-1];
 
 # Fix soilsuite and cropland extent columns
 for col in names_cov
@@ -60,8 +59,8 @@ for col in names_cov
 end
 
 # rm missing values: 1. >5%, drop col; 2. <=5%, drop row
-cols_to_drop_row = Symbol[]
-cols_to_drop_col = Symbol[] 
+cols_to_drop_row = Symbol[];
+cols_to_drop_col = Symbol[];
 for col in names_cov
     n_missing = count(ismissing, df_o[!, col])
     frac_missing = n_missing / nrow(df_o)
@@ -84,7 +83,7 @@ names_cov = filter(x -> !(x in cols_to_drop_col), names_cov) # remove cols-to-dr
 if !isempty(cols_to_drop_row) 
     df_o = subset(df_o, cols_to_drop_row .=> ByRow(!ismissing)) # drop rows with missing values in cols_to_drop_row
 end
-# println(size(df_o))
+println(size(df_o))
 
 cols_to_drop_col = Symbol[] 
 for col in names_cov
@@ -101,18 +100,57 @@ println(size(df_o))
 # end
 
 # # Normalize covariates by (x-mean) / std
-means = mean.(eachcol(df_o[:, names_cov]))
-stds = std.(eachcol(df_o[:, names_cov]))
+means = mean.(eachcol(df_o[:, names_cov]));
+stds = std.(eachcol(df_o[:, names_cov]));
 for col in names_cov
     df_o[!, col] = Float64.(df_o[!, col])
 end
-df_o[:, names_cov] .= (df_o[:, names_cov] .- means') ./ stds'
+df_o[:, names_cov] .= (df_o[:, names_cov] .- means') ./ stds';
 
 df_o.row_id = 1:nrow(df_o);
 # CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed.csv"), df)
 
+############################
+###### transform tgt #######
+############################
+## target: BD g/cm3, SOCconc g/kg, CF fraction
+
+rename!(df_o, :bulk_density_fe => :bd, :soc => :soc, :coarse_vol => :cf); # rename as in hybrid model
+# df_o[!, :SOCconc] .= df_o[!, :SOCconc]; # stay as g/kg
+df_o[!,:ocd] = df_o.bd .* df_o.soc .* (1 .- df_o.cf); # SOCdensity kg/m3
+
+# scales
+scalers = Dict(
+    :SOCconc   => 0.151, # g/kg, log(x+1)*0.151
+    :CF        => 0.263, # percent, log(x+1)*0.263
+    :BD        => 0.529, # g/cm3, x*0.529
+    :SOCdensity => 0.167, # kg/m3, log(x)*0.167
+);
+
+# do conversion
+df_o[:, :SOCconc] .= log.(df_o[!, :soc] .+ 1) .* scalers[:SOCconc];
+df_o[:, :CF] .= log.(df_o[!, :cf] .* 100 .+ 1) .* scalers[:CF];
+df_o[:, :BD] .= df_o[:, :bd] .* scalers[:BD];
+df_o[:, :SOCdensity] .= log.(df_o[!, :ocd]) .* scalers[:SOCdensity];
+
+for col in ["BD", "SOCconc", "CF", "SOCdensity", "bd", "soc", "ocd", "cf"]
+    # values = log10.(df[:, col])
+    values = df_o[:, col]
+    histogram(
+        values;
+        bins = 50,
+        xlabel = col,
+        ylabel = "Frequency",
+        title = "Histogram of $col",
+        lw = 1,
+        legend = false
+    )
+    savefig(joinpath(@__DIR__, "./data/histogram_$col.png"))
+    display(current())
+end
+
 # fillna texture
-g = groupby(df_o, :id)
+g = groupby(df_o, :id);
 for col in [:clay, :silt, :sand]
     transform!(g, col => (x -> begin
         i = findfirst(!ismissing, x)          # index of first non-missing in this id
@@ -120,9 +158,10 @@ for col in [:clay, :silt, :sand]
     end) => col)
 end
 
-df_o[!, target_names]    .= coalesce.(df_o[!, target_names], NaN)
+df_o[!, ["BD", "SOCconc", "CF", "SOCdensity", "bd", "soc", "ocd", "cf"]]    .= coalesce.(df_o[!, ["BD", "SOCconc", "CF", "SOCdensity", "bd", "soc", "ocd", "cf"]], NaN)
 
 println(size(df_o));
+
 CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed_$version.csv"), df_o);
 
 # # split train and test
@@ -156,22 +195,6 @@ CSV.write(joinpath(@__DIR__, "data/lucas_preprocessed_$version.csv"), df_o);
 #     ylims     = (0, 0.6)
 # )   
 # savefig(plt, joinpath(@__DIR__, "./eval/00_truth_BD.vs.SOCconc.png"))
-
-# check distribution of BD, SOCconc, CF
-for col in ["BD", "SOCconc", "CF", "SOCdensity", "maxdiff"]
-    # values = log10.(df[:, col])
-    values = df_o[:, col]
-    histogram(
-        values;
-        bins = 50,
-        xlabel = col,
-        ylabel = "Frequency",
-        title = "Histogram of $col",
-        lw = 1,
-        legend = false
-    )
-    savefig(joinpath(@__DIR__, "./data/histogram_$col.png"))
-end
 
 # # export covariate names
 # open(joinpath(@__DIR__, "./data/cov_names.txt"), "w") do f

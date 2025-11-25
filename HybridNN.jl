@@ -17,56 +17,20 @@ using JLD2
 
 # 03 - flexiable BD, both oBD and mBD will be learnt by NN
 testid = "03_hybridNN";
-version = "v20251120"
+version = "v20251125"
 results_dir = joinpath(@__DIR__, "eval");
 target_names = [:BD, :SOCconc, :CF, :SOCdensity];
 
 # input
 df = CSV.read(joinpath(@__DIR__, "data/lucas_preprocessed_$version.csv"), DataFrame; normalizenames=true)
-
-# scales
-scalers = Dict(
-    :SOCconc   => 0.151, # g/kg, log(x+1)*0.151
-    :CF        => 0.263, # percent, log(x+1)*0.263
-    :BD        => 0.529, # g/cm3, x*0.529
-    :SOCdensity => 0.167, # kg/m3, log(x)*0.167
-);
-
-for tgt in target_names
-    # println(tgt, "------------")
-    # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
-    if tgt in (:SOCconc, :CF)
-        df[!, tgt] .= log.(df[!, tgt] .+ 1) 
-        # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
-    elseif tgt == :SOCdensity
-        df[!, tgt] .= log.(df[!, tgt]) 
-    end
-
-    df[!, tgt] .= df[!, tgt] .* scalers[tgt]
-    # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
-end
-
-for col in ["BD", "SOCconc", "CF", "SOCdensity"]
-    # values = log10.(df[:, col])
-    values = df[:, col]
-    histogram(
-        values;
-        bins = 50,
-        xlabel = col,
-        ylabel = "Frequency",
-        title = "Histogram of $col",
-        lw = 1,
-        legend = false
-    )
-    display(current())
-end
+println(size(df))
 
 # mechanistic model
 function SOCD_model(; SOCconc, CF, oBD, mBD)
     soct = (exp.(SOCconc ./ scalers[:SOCconc]) .- 1) ./ 1000 # to fraction
     cft = (exp.(CF ./ scalers[:CF]) .- 1) ./ 100  # back to fraction
     BD = (oBD .* mBD) ./ (1.724f0 .* soct .* mBD .+ (1f0 .- 1.724f0 .* soct) .* oBD)
-    SOCdensity = soct .*1000 .* BD .* (1 .- cft) # kg/m3
+    SOCdensity = soct .* 1000 .* BD .* (1 .- cft) # kg/cm3
     
     SOCdensity = log.(SOCdensity) .* scalers[:SOCdensity]  # scale to ~[0,1]
     BD = BD .* scalers[:BD]  # scale to ~[0,1]
@@ -88,7 +52,7 @@ forcing = Symbol[]
 targets = [:BD, :SOCconc, :SOCdensity, :CF]       # SOCconc is both a param and a target
 
 # predictor
-predictors = Symbol.(names(df))[19:end-2]; # CHECK EVERY TIME 
+predictors = Symbol.(names(df))[18:end-6]; # CHECK EVERY TIME 
 nf = length(predictors)
 
 # search space
@@ -164,12 +128,13 @@ rlt_list_pred = Vector{DataFrame}(undef, k)
             monitor_names = [:oBD, :mBD],
             agg = mean,
             return_model = :best,
-            show_progress = false,
+            show_progress = true,
             plotting = false,
             hybrid_name = "$(testid)_fold$(test_fold)" 
         )
 
-        if rlt.best_loss < best_val_loss
+        if isfinite(rlt.best_loss) && rlt.best_loss < best_val_loss
+            best_val_loss = rlt.best_loss
             best_config = (h=h, bs=bs, lr=lr, act=act)
             best_result = rlt
             best_hm = deepcopy(hm_local)
