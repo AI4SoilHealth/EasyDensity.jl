@@ -17,11 +17,12 @@ using NNlib
 using JLD2
 
 testid = "01_uniNN"
+version = "v20251125";
 results_dir = joinpath(@__DIR__, "eval");
 target_names = [:BD, :SOCconc, :CF, :SOCdensity];
 
 # input
-df = CSV.read(joinpath(@__DIR__, "data/lucas_preprocessed_v20251113.csv"), DataFrame; normalizenames=true)
+df = CSV.read(joinpath(@__DIR__, "data/lucas_preprocessed_$version.csv"), DataFrame; normalizenames=true)
 
 # scales
 scalers = Dict(
@@ -160,25 +161,33 @@ rlt_list_pred = Vector{DataFrame}(undef, k)
         ))
 
         ps, st = best_rlt.ps, best_rlt.st
-
+        
         try
-            x_test, _ = prepare_data(best_nn, test_df_full)
+            test_df_t = dropmissing(test_df_full, tgt)
+            x_test, _ = prepare_data(best_nn, test_df_t)
             ŷ, _ = best_nn(x_test, ps, LuxCore.testmode(st))
 
-            preds_clean = ŷ[tgt]
+            preds_clean = ŷ[tgt]                   # predictions for filtered test rows
+            rids_clean  = test_df_t.row_id          # corresponding row_ids
 
-            # expand to full rows
+            # full prediction array
             full_pred = fill(NaN32, nrow(test_df_full))
-            idx_clean = findall(x -> !ismissing(getfield(x, tgt)), eachrow(test_df_full))
-            full_pred[idx_clean] .= preds_clean
+
+            # map row_id -> position in test_df_full
+            id_to_pos = Dict(test_df_full.row_id[i] => i for i in 1:nrow(test_df_full))
+
+            # fill only matching rows
+            for (rid, p) in zip(rids_clean, preds_clean)
+                full_pred[id_to_pos[rid]] = p
+            end
 
             fold_preds[!, Symbol("pred_", tgt)] = full_pred
-
 
         catch err
             @warn "Prediction failed for $tgt on fold $test_fold — using NaN"
             fold_preds[!, Symbol("pred_", tgt)] = fill(NaN32, nrow(test_df_full))
         end
+
     end
 
     # save results for this fold
@@ -191,8 +200,8 @@ end
 rlt_param = vcat(rlt_list_param...)
 rlt_pred  = vcat(rlt_list_pred...)
 
-CSV.write(joinpath(results_dir, "$(testid)_cv.pred_v20251113.csv"), rlt_pred)
-CSV.write(joinpath(results_dir, "$(testid)_hyperparams_v20251113.csv"), rlt_param)
+CSV.write(joinpath(results_dir, "$(testid)_cv.pred_$version.csv"), rlt_pred)
+CSV.write(joinpath(results_dir, "$(testid)_hyperparams_$version.csv"), rlt_param)
 
 # # accuracy plots for SOCconc, BD, CF in original space
 # for tname in targets
