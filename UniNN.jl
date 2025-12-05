@@ -146,7 +146,7 @@ rlt_list_pred = Vector{DataFrame}(undef, k)
         agg = :sum
         r2s  = map(vh -> getproperty(vh, agg), best_rlt.val_history.r2)
         mses = map(vh -> getproperty(vh, agg), best_rlt.val_history.mse)
-        be   = best_rlt.best_epoch
+        be = max(best_rlt.best_epoch, 1)
 
         push!(fold_params, (
             fold       = test_fold,
@@ -191,7 +191,32 @@ rlt_list_pred = Vector{DataFrame}(undef, k)
             @warn "Prediction failed for $tgt on fold $test_fold — using NaN"
             test_df_full[!, Symbol("pred_", tgt)] = fill(NaN32, nrow(test_df_full))
         end
+        
+        # -------------------------------------------------------
+        # Sanity check after join
+        # -------------------------------------------------------
 
+        colname = Symbol("pred_", tgt)
+
+        if colname in names(test_df_full)
+            # check how many predictions are non-NaN
+            pred_col = test_df_full[!, colname]
+            n_nonmissing = count(!isnan, pred_col)
+
+            @info "[Fold $test_fold | $tgt] Join completed."
+            @info "  → Column added: $(colname)"
+            @info "  → Non-NaN predictions: $n_nonmissing / $(nrow(test_df_full))"
+
+            # Print first few non-NaN predictions
+            valid_idx = findall(!isnan, pred_col)
+
+            if isempty(valid_idx)
+                @warn "  All predictions are NaN for $tgt on fold $test_fold."
+            end
+
+        else
+            @error "[Fold $test_fold | $tgt] Column $(colname) missing after join!"
+        end
 
     end
 

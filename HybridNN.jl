@@ -25,6 +25,14 @@ target_names = [:BD, :SOCconc, :CF, :SOCdensity];
 df = CSV.read(joinpath(@__DIR__, "data/lucas_preprocessed_$version.csv"), DataFrame; normalizenames=true)
 println(size(df))
 
+# scales
+scalers = Dict(
+    :SOCconc   => 0.151, # g/kg, log(x+1)*0.151
+    :CF        => 0.263, # percent, log(x+1)*0.263
+    :BD        => 0.529, # g/cm3, x*0.529
+    :SOCdensity => 0.167, # kg/m3, log(x)*0.167
+);
+
 # mechanistic model
 function SOCD_model(; SOCconc, CF, oBD, mBD)
     soct = (exp.(SOCconc ./ scalers[:SOCconc]) .- 1) ./ 1000 # to fraction
@@ -36,14 +44,6 @@ function SOCD_model(; SOCconc, CF, oBD, mBD)
     BD = BD .* scalers[:BD]  # scale to ~[0,1]
     return (; BD, SOCconc, CF, SOCdensity, oBD, mBD)  # supervise both BD and SOCconc
 end
-
-# scales
-scalers = Dict(
-    :SOCconc   => 0.151, # g/kg, log(x+1)*0.151
-    :CF        => 0.263, # percent, log(x+1)*0.263
-    :BD        => 0.529, # g/cm3, x*0.529
-    :SOCdensity => 0.167, # kg/m3, log(x)*0.167
-);
 
 # param bounds
 parameters = (
