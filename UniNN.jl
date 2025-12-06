@@ -32,22 +32,8 @@ scalers = Dict(
     :SOCdensity => 0.167, # kg/m3, log(x)*0.167
 );
 
-for tgt in target_names
-    # println(tgt, "------------")
-    # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
-    if tgt in (:SOCconc, :CF)
-        df[!, tgt] .= log.(df[!, tgt] .+ 1) 
-        # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
-    elseif tgt == :SOCdensity
-        df[!, tgt] .= log.(df[!, tgt]) 
-    end
-
-    df[!, tgt] .= df[!, tgt] .* scalers[tgt]
-    # println(minimum(df[:,tgt]), "  ", maximum(df[:,tgt]))
-end
-
 # predictor
-predictors = Symbol.(names(df))[19:end-2] # CHECK EVERY TIME 
+predictors = Symbol.(names(df))[18:end-6]; # CHECK EVERY TIME 
 nf = length(predictors)
 
 # search space
