@@ -5,6 +5,7 @@ Manifest.toml
 *.svg
 /output_tmp
 /eval
+/data/*.pq
 /data/*.csv
 /data/*.png
 .ipynb_checkpoints/
