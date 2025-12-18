@@ -15,10 +15,9 @@ using Plots
 using JLD2
 
 # 03 - flexiable BD, both oBD and mBD will be learnt by NN
-testid = "03_hybridNN";
+testid = "test_hybridNN";
 version = "v20251209"
 results_dir = joinpath(@__DIR__, "eval");
-target_names = [:BD, :SOCconc, :CF, :SOCdensity];
 
 # input
 df = CSV.read(joinpath(@__DIR__, "data/lucas_preprocessed_v20251125.csv"), DataFrame; normalizenames=true)
@@ -39,12 +38,14 @@ function SOCD_model(; SOCconc, CF, oBD, mBD)
     # invert transforms
     soct = (exp.(SOCconc ./ scalers[:SOCconc]) .- 1) ./ 1000
     soct = clamp.(soct, ϵ, Inf)
-
+    
     cft = (exp.(CF ./ scalers[:CF]) .- 1) ./ 100
     cft = clamp.(cft, 0, 0.99)
 
     # compute BD safely
     som = 1.724f0 .* soct
+    som = clamp.(som, 0, 1) # test!!!!!!!!
+    
     denom = som .* mBD .+ (1f0 .- som) .* oBD
     denom = clamp.(denom, ϵ, Inf)
 
@@ -53,7 +54,7 @@ function SOCD_model(; SOCconc, CF, oBD, mBD)
 
     # SOCdensity
     SOCdensity = soct .* 1000 .* BD .* (1 .- cft)
-    SOCdensity = clamp.(SOCdensity, ϵ, Inf)
+    SOCdensity = clamp.(SOCdensity, 1, Inf)
 
     # scale
     SOCdensity = log.(SOCdensity) .* scalers[:SOCdensity]
@@ -81,6 +82,7 @@ targets = [:BD, :SOCconc, :SOCdensity, :CF]       # SOCconc is both a param and 
 predictors = Symbol.(names(df))[18:end-6]; # CHECK EVERY TIME 
 nf = length(predictors)
 
+
 # hyperparameters
 # search space
 hidden_configs = [ 
@@ -106,6 +108,7 @@ configs = [(h=h, bs=bs, lr=lr, act=act)
 println(length(configs))
 
 # cross-validation
+Random.seed!(42);
 k = 5;
 folds = make_folds(df, k = k, shuffle = true);
 rlt_list_param = Vector{DataFrame}(undef, k)
