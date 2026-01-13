@@ -136,8 +136,15 @@ ternary(no_mss, marker=:p, cmap=C, image=true,
         clabel="Clay",
         suffix=" %",
         fill=:grey45,
-        ))
-colorbar!(pos=(paper=true, anchor=(13.5,5), size=(8,0.5), justify=:BL, vertical=true),
+        ),
+    par=(FONT_ANNOT_PRIMARY=14,
+        FONT_LABEL=16,
+        MAP_LABEL_OFFSET="8p",
+        MAP_ANNOT_OFFSET_PRIMARY="6p"
+        )
+        )
+colorbar!(pos=(paper=true, anchor=(13.5,5), size=(8,0.5), justify=:BL, vertical=true, triangles=true),
+    par=(FONT_ANNOT_PRIMARY=14, FONT_LABEL=16,),
     frame=(
         annot=:auto,
         ticks=:auto,
@@ -161,9 +168,15 @@ ternary(no_mBD, marker=:p, cmap=C, ms=0.1, image=true,
         blabel="Silt",
         clabel="Clay",
         suffix=" %",
-        fill=:grey45,
-        ))
-colorbar!(pos=(paper=true, anchor=(13.5,5), size=(8,0.5), justify=:BL, vertical=true,),
+        fill=:grey45,),
+    par=(FONT_ANNOT_PRIMARY=14,
+        FONT_LABEL=16,
+        MAP_LABEL_OFFSET="8p",
+        MAP_ANNOT_OFFSET_PRIMARY="6p"
+        )
+        )
+colorbar!(pos=(paper=true, anchor=(13.5,5), size=(8,0.5), justify=:BL, vertical=true, triangles=true),
+    par=(FONT_ANNOT_PRIMARY=14, FONT_LABEL=16,),
     frame=(
         annot=:auto,
         ticks=:auto,
