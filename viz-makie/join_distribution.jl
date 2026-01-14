@@ -43,6 +43,9 @@ function compute_apply_mask(y_pred, y_target)
     return replace(y_pred[mask], missing => NaN), replace(y_target[mask], missing => NaN)
 end
 
+# ! filter rows where `bd` and `soc` are non-missing
+df = dropmissing(df, [:bd, :soc])
+
 CairoMakie.activate!() # uncomment this to save pdf files.
 mkpath(joinpath(@__DIR__, "../figures/"))
 
@@ -52,7 +55,7 @@ with_theme(theme_latexfonts()) do
         axs = [Axis(fig[1, j], aspect= 1, xlabel = "BD (g/cm3)", ylabel = "SOC content (g/kg)", titlefont = :regular)
             for j in 1:4]
         plt = nothing
-        set_upper_count = 10000 
+        set_upper_count = 1000
         for (i, model_combo) in enumerate(xy_to)
             @show model_combo
             y_x = df[!, "$(model_combo[1])"]
@@ -80,7 +83,7 @@ with_theme(theme_latexfonts()) do
             # labelrotation = 0,
             minorticksvisible=true,
             minorticks=IntervalsBetween(9),
-            ticks = [1, 10, 100, 1000, 10_000],
+            ticks = [1, 10, 100, 1000],
             scale=log10)
         limits!.(axs, 0, 2, 0, 625)
         hideydecorations!.(axs[2:end], ticks=false, grid=false)
